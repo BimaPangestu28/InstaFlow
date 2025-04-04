@@ -1,7 +1,7 @@
 """
 Instagram bot module providing the core functionality for Instagram automation.
 
-This module contains the primary InstagramBot class for interacting with Instagram.
+This module contains the InstagramBot class for interacting with Instagram.
 """
 
 import logging
@@ -10,28 +10,26 @@ import pickle
 import time
 from typing import Dict, List, Optional, Tuple, Union
 
-from selenium import webdriver
 from selenium.common.exceptions import (ElementClickInterceptedException,
                                        NoSuchElementException, StaleElementReferenceException,
                                        TimeoutException, WebDriverException)
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.remote.webdriver import WebDriver
 from selenium.webdriver.remote.webelement import WebElement
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
-from webdriver_manager.chrome import ChromeDriverManager
 
 from ..config.settings import settings
+from .base import BaseBot
+from .challenge_handler import ChallengeHandler
 from .utils import random_delay
 
 # Setup logger
 logger = logging.getLogger(__name__)
 
 
-class InstagramBot:
+class InstagramBot(BaseBot):
     """
     Instagram automation bot for performing various actions on Instagram.
     
@@ -47,12 +45,17 @@ class InstagramBot:
             username: Instagram username (defaults to environment variable)
             password: Instagram password (defaults to environment variable)
         """
+        # Set Instagram-specific attributes before calling parent init
         self.username = username or os.getenv('INSTAGRAM_USERNAME')
         self.password = password or os.getenv('INSTAGRAM_PASSWORD')
         
         if not self.username or not self.password:
             raise ValueError("Instagram credentials not provided and not found in environment variables")
+            
+        # Initialize parent class
+        super().__init__(self.username, self.password)
         
+        # Set Instagram-specific attributes
         self.base_url = "https://www.instagram.com"
         self.cookies_path = os.path.join(
             settings.get('cookies', 'path', default='data/cookies'),
@@ -62,180 +65,20 @@ class InstagramBot:
         # Ensure cookies directory exists
         os.makedirs(os.path.dirname(self.cookies_path), exist_ok=True)
         
-        # Configure webdriver
-        self.driver = self._setup_driver()
-        self.wait = WebDriverWait(
-            self.driver, 
-            settings.get('bot', 'wait_timeout', default=10)
-        )
+        # Initialize challenge handler
+        self.challenge_handler = ChallengeHandler(self.driver, self.wait)
         
-        # Action counters for rate limiting
+        # Initialize action counters for Instagram-specific rate limiting
         self._action_counts = {
             'follows': 0,
             'unfollows': 0,
             'likes': 0,
             'comments': 0,
-            'dm_sends': 0
+            'dm_sends': 0,
+            'stories_viewed': 0
         }
         
         logger.info(f"InstagramBot initialized for user @{self.username}")
-    
-    def __enter__(self) -> 'InstagramBot':
-        """
-        Support for context manager protocol.
-        
-        Returns:
-            Self instance
-        """
-        return self
-    
-    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
-        """
-        Clean up resources when exiting context manager.
-        
-        Args:
-            exc_type: Exception type if an exception was raised
-            exc_val: Exception value if an exception was raised
-            exc_tb: Exception traceback if an exception was raised
-        """
-        self.close()
-    
-    def _setup_driver(self) -> WebDriver:
-        """
-        Set up and configure the Selenium WebDriver.
-        
-        Returns:
-            Configured WebDriver instance
-        """
-        chrome_options = Options()
-        
-        # Add anti-detection options
-        chrome_options.add_argument('--disable-blink-features=AutomationControlled')
-        chrome_options.add_experimental_option('excludeSwitches', ['enable-automation', 'enable-logging'])
-        chrome_options.add_experimental_option('useAutomationExtension', False)
-        
-        # Set user agent
-        user_agent = settings.get('webdriver', 'user_agent')
-        if user_agent:
-            chrome_options.add_argument(f'--user-agent={user_agent}')
-        
-        # Set headless mode if configured
-        if settings.get('webdriver', 'headless', default=False):
-            chrome_options.add_argument('--headless')
-        
-        # Configure proxy if set in environment
-        proxy_host = os.getenv('PROXY_HOST')
-        proxy_port = os.getenv('PROXY_PORT')
-        if proxy_host and proxy_port:
-            proxy_user = os.getenv('PROXY_USERNAME')
-            proxy_pass = os.getenv('PROXY_PASSWORD')
-            
-            if proxy_user and proxy_pass:
-                proxy_auth = f"{proxy_user}:{proxy_pass}@"
-            else:
-                proxy_auth = ""
-                
-            proxy_str = f"{proxy_auth}{proxy_host}:{proxy_port}"
-            chrome_options.add_argument(f'--proxy-server={proxy_str}')
-            logger.info(f"Using proxy: {proxy_host}:{proxy_port}")
-        
-        # Create driver
-        try:
-            # Check for custom chrome binary path
-            chrome_binary = os.getenv('CHROME_BINARY_PATH')
-            if chrome_binary:
-                chrome_options.binary_location = chrome_binary
-            
-            # Check for custom chromedriver path
-            chromedriver_path = os.getenv('CHROMEDRIVER_PATH')
-            if chromedriver_path:
-                driver = webdriver.Chrome(
-                    service=Service(chromedriver_path),
-                    options=chrome_options
-                )
-            else:
-                # Use webdriver_manager to auto-download appropriate chromedriver
-                driver = webdriver.Chrome(
-                    service=Service(ChromeDriverManager().install()),
-                    options=chrome_options
-                )
-            
-            # Set window size
-            driver.set_window_size(1280, 800)
-            
-            # Apply additional CDP settings to avoid detection
-            driver.execute_cdp_cmd('Network.setUserAgentOverride', {
-                "userAgent": user_agent or (
-                    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
-                    'AppleWebKit/537.36 (KHTML, like Gecko) '
-                    'Chrome/91.0.4472.124 Safari/537.36'
-                )
-            })
-            
-            # Set page load strategy
-            driver.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {
-                'source': '''
-                    Object.defineProperty(navigator, 'webdriver', {
-                        get: () => undefined
-                    });
-                '''
-            })
-            
-            logger.info("WebDriver initialized successfully")
-            return driver
-            
-        except Exception as e:
-            logger.error(f"Failed to initialize WebDriver: {e}")
-            raise
-    
-    def _save_cookies(self) -> bool:
-        """
-        Save current session cookies to file.
-        
-        Returns:
-            bool: True if cookies were saved successfully, False otherwise
-        """
-        try:
-            os.makedirs(os.path.dirname(self.cookies_path), exist_ok=True)
-            pickle.dump(self.driver.get_cookies(), open(self.cookies_path, 'wb'))
-            logger.debug(f"Cookies saved to {self.cookies_path}")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to save cookies: {e}")
-            return False
-    
-    def _load_cookies(self) -> bool:
-        """
-        Load cookies from file to current session.
-        
-        Returns:
-            bool: True if cookies were loaded successfully, False otherwise
-        """
-        try:
-            if not os.path.exists(self.cookies_path):
-                logger.debug(f"No cookies file found at {self.cookies_path}")
-                return False
-                
-            cookies = pickle.load(open(self.cookies_path, 'rb'))
-            
-            # Navigate to Instagram first (cookies domain must match)
-            self.driver.get(self.base_url)
-            
-            # Add cookies to browser session
-            for cookie in cookies:
-                try:
-                    self.driver.add_cookie(cookie)
-                except Exception as cookie_error:
-                    logger.warning(f"Failed to add cookie: {cookie_error}")
-            
-            # Refresh page to apply cookies
-            self.driver.refresh()
-            logger.debug("Cookies loaded successfully")
-            return True
-            
-        except Exception as e:
-            logger.error(f"Failed to load cookies: {e}")
-            return False
     
     def _check_login_status(self) -> bool:
         """
@@ -317,6 +160,14 @@ class InstagramBot:
             # Submit login form
             password_input.send_keys(Keys.RETURN)
             
+            # Check for login challenges
+            time.sleep(3)  # Wait a moment for any challenge to appear
+            if self.challenge_handler.check_for_challenge():
+                logger.warning("Login challenge detected, attempting to handle")
+                if not self.challenge_handler.handle_challenge():
+                    logger.error("Failed to handle login challenge")
+                    return False
+            
             # Wait for successful login
             self.wait.until(
                 EC.presence_of_element_located((By.XPATH, "//a[contains(@href, '/direct/inbox/')]"))
@@ -335,28 +186,6 @@ class InstagramBot:
         except Exception as e:
             logger.error(f"Login failed: {e}")
             return False
-    
-    def _check_rate_limit(self, action_type: str) -> bool:
-        """
-        Check if an action would exceed rate limits.
-        
-        Args:
-            action_type: Type of action to check (follows, unfollows, likes, comments, dm_sends)
-            
-        Returns:
-            bool: True if action is allowed, False if rate limit would be exceeded
-        """
-        # Get daily limit for this action type
-        daily_limit = settings.get('actions', 'daily_limits', action_type, default=0)
-        
-        # Check if we've reached the limit
-        if self._action_counts.get(action_type, 0) >= daily_limit:
-            logger.warning(f"Rate limit reached for {action_type}: {daily_limit} per day")
-            return False
-        
-        # Increment counter and allow action
-        self._action_counts[action_type] = self._action_counts.get(action_type, 0) + 1
-        return True
     
     def follow_user(self, username: str) -> bool:
         """
@@ -392,17 +221,26 @@ class InstagramBot:
             # Wait a moment for the action to complete
             random_delay(min_seconds=1, max_seconds=3)
             
+            # Update success rate tracking
+            self._update_success_rate('follows', True)
+            
             logger.info(f"Successfully followed @{username}")
             return True
             
         except TimeoutException:
             logger.warning(f"Follow button not found for @{username}, might already be following")
+            # Update success rate tracking
+            self._update_success_rate('follows', False)
             return False
         except ElementClickInterceptedException:
             logger.warning(f"Follow button was intercepted for @{username}, possible popup")
+            # Update success rate tracking
+            self._update_success_rate('follows', False)
             return False
         except Exception as e:
             logger.error(f"Error following @{username}: {e}")
+            # Update success rate tracking
+            self._update_success_rate('follows', False)
             return False
     
     def unfollow_user(self, username: str) -> bool:
@@ -456,17 +294,26 @@ class InstagramBot:
             # Wait a moment for the action to complete
             random_delay(min_seconds=1, max_seconds=3)
             
+            # Update success rate tracking
+            self._update_success_rate('unfollows', True)
+            
             logger.info(f"Successfully unfollowed @{username}")
             return True
             
         except TimeoutException:
             logger.warning(f"Unfollow button not found for @{username}, might not be following")
+            # Update success rate tracking
+            self._update_success_rate('unfollows', False)
             return False
         except ElementClickInterceptedException:
             logger.warning(f"Unfollow button was intercepted for @{username}, possible popup")
+            # Update success rate tracking
+            self._update_success_rate('unfollows', False)
             return False
         except Exception as e:
             logger.error(f"Error unfollowing @{username}: {e}")
+            # Update success rate tracking
+            self._update_success_rate('unfollows', False)
             return False
     
     def like_post(self, post_url: str) -> bool:
@@ -509,14 +356,21 @@ class InstagramBot:
             # Wait a moment for the action to complete
             random_delay(min_seconds=1, max_seconds=2)
             
+            # Update success rate tracking
+            self._update_success_rate('likes', True)
+            
             logger.info(f"Successfully liked post: {post_url}")
             return True
             
         except NoSuchElementException:
             logger.warning(f"Like button not found for {post_url}, post might already be liked")
+            # Update success rate tracking
+            self._update_success_rate('likes', False)
             return False
         except Exception as e:
             logger.error(f"Error liking post {post_url}: {e}")
+            # Update success rate tracking
+            self._update_success_rate('likes', False)
             return False
     
     def explore_hashtag(self, hashtag: str, num_posts: int = 5) -> List[str]:
@@ -624,11 +478,16 @@ class InstagramBot:
             # Wait for the comment to be posted
             random_delay(min_seconds=2, max_seconds=4)
             
+            # Update success rate tracking
+            self._update_success_rate('comments', True)
+            
             logger.info(f"Successfully commented on post: {post_url}")
             return True
             
         except Exception as e:
             logger.error(f"Error commenting on post {post_url}: {e}")
+            # Update success rate tracking
+            self._update_success_rate('comments', False)
             return False
     
     def get_user_followers(self, username: str, max_count: int = 50) -> List[str]:
@@ -713,12 +572,255 @@ class InstagramBot:
             logger.error(f"Error retrieving followers for @{username}: {e}")
             return followers
     
-    def close(self) -> None:
+    def view_story(self, username: str) -> bool:
         """
-        Close the WebDriver and clean up resources.
+        View the Instagram story of a specific user.
+        
+        Args:
+            username: Username of the account whose story to view
+            
+        Returns:
+            bool: True if successfully viewed story, False otherwise
         """
+        # Check rate limit first
+        if not self._check_rate_limit('stories_viewed'):
+            return False
+            
+        logger.info(f"Attempting to view story of @{username}")
+        
         try:
-            self.driver.quit()
-            logger.info("WebDriver closed successfully")
+            # Navigate to user's profile
+            self.driver.get(f"{self.base_url}/{username}/")
+            
+            # Wait for the profile to load
+            self.wait.until(
+                EC.presence_of_element_located((By.XPATH, "//header"))
+            )
+            
+            # Check if story is available
+            story_element = None
+            try:
+                story_element = self.driver.find_element(
+                    By.XPATH,
+                    "//div[contains(@class, 'story-ring')]"
+                )
+            except NoSuchElementException:
+                logger.info(f"@{username} doesn't have an active story")
+                return False
+            
+            # Click on the story
+            story_element.click()
+            
+            # Wait for story to load
+            self.wait.until(
+                EC.presence_of_element_located((By.XPATH, "//div[contains(@class, 'story')]"))
+            )
+            
+            # Wait for a random amount of time to simulate viewing
+            random_delay(min_seconds=2, max_seconds=10)
+            
+            # Multiple story items - randomly view a few
+            story_items = random.randint(1, 5)
+            for _ in range(story_items):
+                try:
+                    # Click right side to advance to next item
+                    next_button = self.driver.find_element(
+                        By.XPATH,
+                        "//button[contains(@class, 'next')]"
+                    )
+                    next_button.click()
+                    random_delay(min_seconds=1, max_seconds=5)
+                except NoSuchElementException:
+                    break  # No more story items
+            
+            # Press ESC to exit story viewer
+            webdriver.ActionChains(self.driver).send_keys(Keys.ESCAPE).perform()
+            
+            # Update success rate tracking
+            self._update_success_rate('stories_viewed', True)
+            
+            logger.info(f"Successfully viewed story of @{username}")
+            return True
+            
         except Exception as e:
-            logger.error(f"Error closing WebDriver: {e}")
+            logger.error(f"Error viewing story of @{username}: {e}")
+            # Update success rate tracking
+            self._update_success_rate('stories_viewed', False)
+            return False
+    
+    def send_direct_message(self, username: str, message: str) -> bool:
+        """
+        Send a direct message to a specific Instagram user.
+        
+        Args:
+            username: Username of the account to message
+            message: Message text to send
+            
+        Returns:
+            bool: True if successfully sent message, False otherwise
+        """
+        # Check rate limit first
+        if not self._check_rate_limit('dm_sends'):
+            return False
+            
+        logger.info(f"Attempting to send DM to @{username}")
+        
+        try:
+            # Navigate to direct messages
+            self.driver.get(f"{self.base_url}/direct/inbox/")
+            
+            # Wait for inbox to load
+            self.wait.until(
+                EC.presence_of_element_located((By.XPATH, "//div[contains(@class, 'inbox')]"))
+            )
+            
+            # Click on new message button
+            new_message_button = self.driver.find_element(
+                By.XPATH,
+                "//button[contains(text(), 'New message') or contains(@aria-label, 'New message')]"
+            )
+            new_message_button.click()
+            
+            # Wait for recipient selector dialog
+            recipient_input = self.wait.until(
+                EC.presence_of_element_located((By.XPATH, "//input[contains(@placeholder, 'Search')]"))
+            )
+            
+            # Type username
+            recipient_input.send_keys(username)
+            
+            # Wait for search results
+            random_delay(min_seconds=1, max_seconds=3)
+            
+            # Select the user from search results
+            user_element = self.wait.until(
+                EC.element_to_be_clickable((By.XPATH, f"//div[contains(text(), '{username}')]"))
+            )
+            user_element.click()
+            
+            # Click Next button
+            next_button = self.driver.find_element(
+                By.XPATH,
+                "//button[contains(text(), 'Next')]"
+            )
+            next_button.click()
+            
+            # Wait for message input field
+            message_input = self.wait.until(
+                EC.presence_of_element_located((By.XPATH, "//textarea[contains(@placeholder, 'Message')]"))
+            )
+            
+            # Type message
+            message_input.send_keys(message)
+            
+            # Wait a moment before sending
+            random_delay(min_seconds=1, max_seconds=3)
+            
+            # Send the message
+            message_input.send_keys(Keys.RETURN)
+            
+            # Wait for the message to be sent
+            random_delay(min_seconds=2, max_seconds=4)
+            
+            # Update success rate tracking
+            self._update_success_rate('dm_sends', True)
+            
+            logger.info(f"Successfully sent DM to @{username}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error sending DM to @{username}: {e}")
+            # Update success rate tracking
+            self._update_success_rate('dm_sends', False)
+            return False
+    
+    def get_competitor_followers(self, competitor_username: str, max_count: int = 50) -> List[str]:
+        """
+        Get followers of a competitor/similar account for targeting.
+        
+        This is a wrapper around get_user_followers but with specific logging.
+        
+        Args:
+            competitor_username: Username of the competitor account
+            max_count: Maximum number of followers to retrieve
+            
+        Returns:
+            List of follower usernames
+        """
+        logger.info(f"Retrieving followers from competitor @{competitor_username}")
+        return self.get_user_followers(competitor_username, max_count)
+    
+    def find_users_by_location(self, location_id: str, max_count: int = 20) -> List[str]:
+        """
+        Find users who posted at a specific location.
+        
+        Args:
+            location_id: Instagram location ID
+            max_count: Maximum number of users to retrieve
+            
+        Returns:
+            List of usernames
+        """
+        logger.info(f"Finding users for location {location_id}")
+        usernames = []
+        
+        try:
+            # Navigate to the location page
+            self.driver.get(f"{self.base_url}/explore/locations/{location_id}/")
+            
+            # Wait for posts to load
+            self.wait.until(
+                EC.presence_of_element_located((By.XPATH, "//article//a"))
+            )
+            
+            # Apply random delay to mimic human behavior
+            random_delay()
+            
+            # Find post links
+            post_links = self.driver.find_elements(By.XPATH, "//article//a")
+            
+            # Process posts until we reach the max count
+            post_urls = []
+            for link in post_links:
+                post_url = link.get_attribute('href')
+                if post_url:
+                    post_urls.append(post_url)
+            
+            # Visit each post to get the username
+            for post_url in post_urls[:min(len(post_urls), max_count * 2)]:  # Get more than needed
+                if len(usernames) >= max_count:
+                    break
+                    
+                try:
+                    # Navigate to the post
+                    self.driver.get(post_url)
+                    
+                    # Wait for post to load
+                    self.wait.until(
+                        EC.presence_of_element_located((By.XPATH, "//article"))
+                    )
+                    
+                    # Find username
+                    username_element = self.driver.find_element(
+                        By.XPATH,
+                        "//a[contains(@href, '/') and not(contains(@href, '/explore'))]"
+                    )
+                    
+                    username = username_element.get_attribute('href').split('/')[-2]
+                    
+                    if username and username not in usernames:
+                        usernames.append(username)
+                    
+                    # Add random delay between post visits
+                    random_delay(min_seconds=1, max_seconds=3)
+                    
+                except Exception as e:
+                    logger.error(f"Error processing post {post_url}: {e}")
+                    continue
+            
+            logger.info(f"Found {len(usernames)} users for location {location_id}")
+            return usernames
+            
+        except Exception as e:
+            logger.error(f"Error finding users for location {location_id}: {e}")
+            return usernames
