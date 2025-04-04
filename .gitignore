@@ -177,3 +177,4 @@ pyrightconfig.json
 
 cookies/*
 config/*
+data/*
